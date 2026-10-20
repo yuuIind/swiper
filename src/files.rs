@@ -17,9 +17,16 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
             (None, _) => return Ordering::Less,
             (_, None) => return Ordering::Greater,
             (Some(c), Some(d)) if c.is_ascii_digit() && d.is_ascii_digit() => {
-                let ex = x.iter().position(|c| !c.is_ascii_digit()).unwrap_or(x.len());
-                let ey = y.iter().position(|c| !c.is_ascii_digit()).unwrap_or(y.len());
-                let trim = |s: &[u8]| -> usize { s.iter().position(|&c| c != b'0').unwrap_or(s.len()) };
+                let ex = x
+                    .iter()
+                    .position(|c| !c.is_ascii_digit())
+                    .unwrap_or(x.len());
+                let ey = y
+                    .iter()
+                    .position(|c| !c.is_ascii_digit())
+                    .unwrap_or(y.len());
+                let trim =
+                    |s: &[u8]| -> usize { s.iter().position(|&c| c != b'0').unwrap_or(s.len()) };
                 let (nx, ny) = (&x[trim(&x[..ex])..ex], &y[trim(&y[..ey])..ey]);
                 let ord = nx.len().cmp(&ny.len()).then(nx.cmp(ny));
                 if ord != Ordering::Equal {
@@ -46,8 +53,14 @@ pub struct History {
 }
 
 pub fn read_log(path: &Path) -> History {
-    let mut h = History { moved: HashMap::new(), undo: Vec::new(), skipped: HashSet::new() };
-    let Ok(f) = fs::File::open(path) else { return h };
+    let mut h = History {
+        moved: HashMap::new(),
+        undo: Vec::new(),
+        skipped: HashSet::new(),
+    };
+    let Ok(f) = fs::File::open(path) else {
+        return h;
+    };
     for line in BufReader::new(f).lines().map_while(Result::ok) {
         let mut parts = line.split('\t');
         match (parts.next(), parts.next(), parts.next()) {
@@ -96,14 +109,26 @@ pub fn unique_dest(dir: &Path, name: &str) -> PathBuf {
         return p;
     }
     let path = Path::new(name);
-    let stem = path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
-    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-    (1..).map(|i| dir.join(format!("{stem}_{i}{ext}"))).find(|p| !p.exists()).unwrap()
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (1..)
+        .map(|i| dir.join(format!("{stem}_{i}{ext}")))
+        .find(|p| !p.exists())
+        .unwrap()
 }
 
 pub fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     if dst.exists() {
-        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "destination exists"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "destination exists",
+        ));
     }
     match fs::rename(src, dst) {
         Ok(()) => Ok(()),

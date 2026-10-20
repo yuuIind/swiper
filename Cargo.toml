@@ -2,6 +2,8 @@
 name = "swiper"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "A tiny, keyboard-driven image sorter for curating datasets"
 
 [dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
@@ -17,3 +19,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[build-dependencies]
+winresource = "0.1.34"

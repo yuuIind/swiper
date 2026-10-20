@@ -9,8 +9,14 @@ pub const DEFAULT_MAX_SIDE: u32 = 1920;
 pub const DEFAULT_AHEAD: usize = 8;
 
 /// Keys used for navigation and therefore not bindable to targets.
-pub const RESERVED: &[Key] =
-    &[Key::ArrowLeft, Key::ArrowRight, Key::Space, Key::Backspace, Key::Home, Key::Escape];
+pub const RESERVED: &[Key] = &[
+    Key::ArrowLeft,
+    Key::ArrowRight,
+    Key::Space,
+    Key::Backspace,
+    Key::Home,
+    Key::Escape,
+];
 
 pub struct Target {
     pub key: Key,
@@ -76,17 +82,29 @@ pub fn build_config(
             return Err("a target cannot be the image folder itself".into());
         }
         fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-        let label = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let label = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         targets.push(Target { key, label, dir });
     }
 
-    let saved: String =
-        targets.iter().map(|t| format!("{}={}\n", t.key.name(), t.dir.display())).collect();
+    let saved: String = targets
+        .iter()
+        .map(|t| format!("{}={}\n", t.key.name(), t.dir.display()))
+        .collect();
     let targets_file = state_dir.join("targets.txt");
-    fs::write(&targets_file, saved).map_err(|e| format!("writing {}: {e}", targets_file.display()))?;
+    fs::write(&targets_file, saved)
+        .map_err(|e| format!("writing {}: {e}", targets_file.display()))?;
     remember_recent(&source);
 
-    Ok(Config { source, state_dir, targets, max_side, ahead })
+    Ok(Config {
+        source,
+        state_dir,
+        targets,
+        max_side,
+        ahead,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +123,10 @@ pub fn recent_projects() -> Vec<PathBuf> {
     let Some(text) = recent_file().and_then(|f| fs::read_to_string(f).ok()) else {
         return Vec::new();
     };
-    text.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect()
+    text.lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn remember_recent(source: &Path) {

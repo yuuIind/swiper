@@ -11,6 +11,7 @@ mod config;
 mod files;
 mod setup;
 mod sorter;
+mod theme;
 
 use config::{DEFAULT_AHEAD, DEFAULT_MAX_SIDE};
 use eframe::egui;
@@ -49,7 +50,12 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut args = std::env::args().skip(1);
-    let mut out = Args { source: None, bindings: Vec::new(), max_side: DEFAULT_MAX_SIDE, ahead: DEFAULT_AHEAD };
+    let mut out = Args {
+        source: None,
+        bindings: Vec::new(),
+        max_side: DEFAULT_MAX_SIDE,
+        ahead: DEFAULT_AHEAD,
+    };
 
     while let Some(a) = args.next() {
         let mut num = |name: &str| -> Result<usize, String> {
@@ -96,6 +102,7 @@ enum Screen {
 
 struct Root {
     screen: Screen,
+    logo: egui::TextureHandle,
 }
 
 fn set_title(ctx: &egui::Context, sorter: Option<&Sorter>) {
@@ -111,7 +118,7 @@ impl eframe::App for Root {
         let ctx = ui.ctx().clone();
         match &mut self.screen {
             Screen::Setup(setup) => {
-                if let Some(cfg) = setup.ui(ui) {
+                if let Some(cfg) = setup.ui(ui, &self.logo) {
                     match Sorter::new(&ctx, cfg) {
                         Ok(s) => {
                             set_title(&ctx, Some(&s));
@@ -123,7 +130,11 @@ impl eframe::App for Root {
             }
             Screen::Sort(sorter) => {
                 if sorter.ui(ui) {
-                    let (src, max_side, ahead) = (sorter.cfg.source.clone(), sorter.cfg.max_side, sorter.cfg.ahead);
+                    let (src, max_side, ahead) = (
+                        sorter.cfg.source.clone(),
+                        sorter.cfg.max_side,
+                        sorter.cfg.ahead,
+                    );
                     sorter.finish();
                     self.screen = Screen::Setup(Setup::new(Some(&src), max_side, ahead, None));
                     set_title(&ctx, None);
@@ -160,11 +171,21 @@ fn main() {
         if !bindings.iter().any(|(k, _)| *k == egui::Key::Delete) {
             bindings.push((egui::Key::Delete, config::default_delete_dir(src)));
         }
-        Some(config::build_config(src, bindings, args.max_side, args.ahead))
+        Some(config::build_config(
+            src,
+            bindings,
+            args.max_side,
+            args.ahead,
+        ))
     });
 
+    let icon = load_icon();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 860.0]).with_title("swiper"),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 860.0])
+            .with_min_inner_size([720.0, 480.0])
+            .with_title("swiper")
+            .with_icon(icon.clone()),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -172,7 +193,23 @@ fn main() {
         options,
         Box::new(move |cc| {
             let ctx = &cc.egui_ctx;
-            let setup = |err| Screen::Setup(Setup::new(args.source.as_deref(), args.max_side, args.ahead, err));
+            theme::apply(ctx);
+            let logo = ctx.load_texture(
+                "logo",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [icon.width as usize, icon.height as usize],
+                    &icon.rgba,
+                ),
+                egui::TextureOptions::LINEAR,
+            );
+            let setup = |err| {
+                Screen::Setup(Setup::new(
+                    args.source.as_deref(),
+                    args.max_side,
+                    args.ahead,
+                    err,
+                ))
+            };
             let screen = match start {
                 Some(Ok(cfg)) => match Sorter::new(ctx, cfg) {
                     Ok(s) => {
@@ -184,11 +221,27 @@ fn main() {
                 Some(Err(e)) => setup(Some(e)),
                 None => setup(None),
             };
-            Ok(Box::new(Root { screen }))
+            Ok(Box::new(Root { screen, logo }))
         }),
     );
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+/// The 256 px logo, used for the window/taskbar icon and the setup screen.
+fn load_icon() -> egui::IconData {
+    let img = image::load_from_memory_with_format(
+        include_bytes!("../assets/icon-256.png"),
+        image::ImageFormat::Png,
+    )
+    .expect("embedded icon is a valid PNG")
+    .into_rgba8();
+    let (width, height) = img.dimensions();
+    egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
     }
 }

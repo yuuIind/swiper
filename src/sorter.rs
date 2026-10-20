@@ -3,7 +3,8 @@
 
 use crate::config::Config;
 use crate::files::{list_images, move_file, natural_cmp, read_log, unique_dest};
-use eframe::egui;
+use crate::theme;
+use eframe::egui::{self, RichText};
 use image::{DynamicImage, ImageDecoder, ImageReader, metadata::Orientation};
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
@@ -33,9 +34,19 @@ struct Item {
 // File-operation worker: all moves happen off the UI thread, strictly in order.
 
 enum Op {
-    Move { idx: usize, name: String, dir: PathBuf },
-    Undo { idx: usize, target: Option<usize>, name: String },
-    Skip { name: String },
+    Move {
+        idx: usize,
+        name: String,
+        dir: PathBuf,
+    },
+    Undo {
+        idx: usize,
+        target: Option<usize>,
+        name: String,
+    },
+    Skip {
+        name: String,
+    },
 }
 
 enum Report {
@@ -82,7 +93,11 @@ fn spawn_file_worker(
                 }
                 Op::Undo { idx, target, name } => {
                     let Some(dst) = moved.get(&name) else {
-                        report(Report::UndoFailed(idx, target, format!("undo {name}: unknown destination")));
+                        report(Report::UndoFailed(
+                            idx,
+                            target,
+                            format!("undo {name}: unknown destination"),
+                        ));
                         continue;
                     };
                     match move_file(dst, &source.join(&name)) {
@@ -138,7 +153,10 @@ fn decode(path: &Path, max_side: u32) -> Result<(egui::ColorImage, [u32; 2]), St
     let mut orig = [img.width(), img.height()];
     if matches!(
         orientation,
-        Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
     ) {
         orig.swap(0, 1);
     }
@@ -148,26 +166,45 @@ fn decode(path: &Path, max_side: u32) -> Result<(egui::ColorImage, [u32; 2]), St
     img.apply_orientation(orientation);
     let rgba = img.into_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
-    Ok((egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()), orig))
+    Ok((
+        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+        orig,
+    ))
 }
 
-fn spawn_decoders(wanted: Arc<Mutex<HashSet<usize>>>, out: Sender<Decoded>, ctx: egui::Context) -> Sender<Job> {
+fn spawn_decoders(
+    wanted: Arc<Mutex<HashSet<usize>>>,
+    out: Sender<Decoded>,
+    ctx: egui::Context,
+) -> Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
     let rx = Arc::new(Mutex::new(rx));
-    let n = std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).clamp(1, 8));
+    let n =
+        std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).clamp(1, 8));
     for _ in 0..n {
         let (rx, wanted, out, ctx) = (rx.clone(), wanted.clone(), out.clone(), ctx.clone());
-        std::thread::spawn(move || loop {
-            let Ok(job) = rx.lock().unwrap().recv() else { return };
-            // The user may have raced past this image already.
-            if !wanted.lock().unwrap().contains(&job.idx) {
-                continue;
+        std::thread::spawn(move || {
+            loop {
+                let Ok(job) = rx.lock().unwrap().recv() else {
+                    return;
+                };
+                // The user may have raced past this image already.
+                if !wanted.lock().unwrap().contains(&job.idx) {
+                    continue;
+                }
+                let result = decode(&job.path, job.max_side);
+                if out
+                    .send(Decoded {
+                        idx: job.idx,
+                        full: job.full,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                ctx.request_repaint();
             }
-            let result = decode(&job.path, job.max_side);
-            if out.send(Decoded { idx: job.idx, full: job.full, result }).is_err() {
-                return;
-            }
-            ctx.request_repaint();
         });
     }
     tx
@@ -219,22 +256,42 @@ impl Sorter {
         let mut items: Vec<Item> = names
             .into_iter()
             .map(|name| {
-                let state = if history.skipped.contains(&name) { State::Skipped } else { State::Pending };
+                let state = if history.skipped.contains(&name) {
+                    State::Skipped
+                } else {
+                    State::Pending
+                };
                 Item { name, state }
             })
-            .chain(history.moved.keys().map(|n| Item { name: n.clone(), state: State::Moved }))
+            .chain(history.moved.keys().map(|n| Item {
+                name: n.clone(),
+                state: State::Moved,
+            }))
             .collect();
         items.sort_by(|a, b| natural_cmp(&a.name, &b.name));
 
-        let index: HashMap<&str, usize> =
-            items.iter().enumerate().map(|(i, it)| (it.name.as_str(), i)).collect();
-        let undo = history.undo.iter().filter_map(|n| index.get(n.as_str()).map(|&i| (i, None))).collect();
+        let index: HashMap<&str, usize> = items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| (it.name.as_str(), i))
+            .collect();
+        let undo = history
+            .undo
+            .iter()
+            .filter_map(|n| index.get(n.as_str()).map(|&i| (i, None)))
+            .collect();
 
         let (dec_tx, dec_rx) = mpsc::channel();
         let (rep_tx, rep_rx) = mpsc::channel();
         let wanted = Arc::new(Mutex::new(HashSet::new()));
         let jobs = spawn_decoders(wanted.clone(), dec_tx, ctx.clone());
-        let (ops, worker) = spawn_file_worker(cfg.source.clone(), log_path, history.moved, rep_tx, ctx.clone());
+        let (ops, worker) = spawn_file_worker(
+            cfg.source.clone(),
+            log_path,
+            history.moved,
+            rep_tx,
+            ctx.clone(),
+        );
 
         let mut s = Self {
             counts: vec![0; cfg.targets.len()],
@@ -264,12 +321,15 @@ impl Sorter {
     }
 
     fn prev_open(&self, from: usize) -> Option<usize> {
-        (0..from).rev().find(|&i| self.items[i].state != State::Moved)
+        (0..from)
+            .rev()
+            .find(|&i| self.items[i].state != State::Moved)
     }
 
     /// First pending image, falling back to the first skipped one.
     fn first_open(&self) -> Option<usize> {
-        self.next_where(0, |s| s == State::Pending).or_else(|| self.next_where(0, |s| s == State::Skipped))
+        self.next_where(0, |s| s == State::Pending)
+            .or_else(|| self.next_where(0, |s| s == State::Skipped))
     }
 
     fn advance(&mut self, from: usize) {
@@ -302,19 +362,27 @@ impl Sorter {
                 if let Some(c) = self.cursor {
                     self.message = None;
                     self.items[c].state = State::Skipped;
-                    let _ = self.ops.send(Op::Skip { name: self.items[c].name.clone() });
+                    let _ = self.ops.send(Op::Skip {
+                        name: self.items[c].name.clone(),
+                    });
                     self.advance(c);
                 }
             }
             _ => {
-                let Some(t) = self.cfg.targets.iter().position(|t| t.key == key) else { return };
+                let Some(t) = self.cfg.targets.iter().position(|t| t.key == key) else {
+                    return;
+                };
                 let Some(c) = self.cursor else { return };
                 self.message = None;
                 self.items[c].state = State::Moved;
                 self.undo.push((c, Some(t)));
                 self.counts[t] += 1;
                 let dir = self.cfg.targets[t].dir.clone();
-                let _ = self.ops.send(Op::Move { idx: c, name: self.items[c].name.clone(), dir });
+                let _ = self.ops.send(Op::Move {
+                    idx: c,
+                    name: self.items[c].name.clone(),
+                    dir,
+                });
                 self.advance(c);
             }
         }
@@ -330,7 +398,11 @@ impl Sorter {
         if let Some(t) = target {
             self.counts[t] -= 1;
         }
-        let _ = self.ops.send(Op::Undo { idx, target, name: self.items[idx].name.clone() });
+        let _ = self.ops.send(Op::Undo {
+            idx,
+            target,
+            name: self.items[idx].name.clone(),
+        });
         // The texture may still be cached; drop it only if it failed earlier.
         if matches!(self.cache.get(&idx), Some(Slot::Failed(_))) {
             self.cache.remove(&idx);
@@ -367,7 +439,11 @@ impl Sorter {
         while let Ok(d) = self.decoded.try_recv() {
             let slot = match d.result {
                 Ok((img, orig)) => {
-                    let tex = ctx.load_texture(format!("img{}", d.idx), img, egui::TextureOptions::LINEAR);
+                    let tex = ctx.load_texture(
+                        format!("img{}", d.idx),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    );
                     Slot::Ready(tex, orig)
                 }
                 Err(e) => Slot::Failed(e),
@@ -409,9 +485,17 @@ impl Sorter {
             }
         }
         // Keep (but never load) the most recently moved image so undo is instant.
-        let keep = self.undo.last().map(|&(i, _)| i).filter(|i| self.cache.contains_key(i));
+        let keep = self
+            .undo
+            .last()
+            .map(|&(i, _)| i)
+            .filter(|i| self.cache.contains_key(i));
 
-        if self.hires.as_ref().is_some_and(|(i, _)| Some(*i) != self.cursor) {
+        if self
+            .hires
+            .as_ref()
+            .is_some_and(|(i, _)| Some(*i) != self.cursor)
+        {
             self.hires = None;
         }
         let wanted: HashSet<usize> = order.iter().copied().chain(keep).collect();
@@ -421,7 +505,12 @@ impl Sorter {
             if !self.cache.contains_key(&idx) {
                 self.cache.insert(idx, Slot::Loading);
                 let path = self.cfg.source.join(&self.items[idx].name);
-                let _ = self.jobs.send(Job { idx, path, max_side: self.cfg.max_side, full: false });
+                let _ = self.jobs.send(Job {
+                    idx,
+                    path,
+                    max_side: self.cfg.max_side,
+                    full: false,
+                });
             }
         }
     }
@@ -430,7 +519,12 @@ impl Sorter {
         if self.hires.is_none() {
             self.hires = Some((idx, Slot::Loading));
             let path = self.cfg.source.join(&self.items[idx].name);
-            let _ = self.jobs.send(Job { idx, path, max_side: max_texture_side as u32, full: true });
+            let _ = self.jobs.send(Job {
+                idx,
+                path,
+                max_side: max_texture_side as u32,
+                full: true,
+            });
         }
     }
 
@@ -460,7 +554,11 @@ impl Sorter {
         let fit = (rect.width() / orig.x).min(rect.height() / orig.y);
         let max_zoom = MAX_PIXEL_ZOOM / ppp / fit;
 
-        let resp = ui.interact(rect, ui.scope_id().with("image"), egui::Sense::click_and_drag());
+        let resp = ui.interact(
+            rect,
+            ui.scope_id().with("image"),
+            egui::Sense::click_and_drag(),
+        );
         if let Some(p) = resp.hover_pos() {
             let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
             let factor = pinch * (scroll * 0.003).exp();
@@ -494,7 +592,9 @@ impl Sorter {
         self.pan = self.pan.clamp(-slack, slack);
         let img_rect = egui::Rect::from_center_size(rect.center() + self.pan, size);
 
-        let Some(Slot::Ready(low, _)) = self.cache.get(&idx) else { return };
+        let Some(Slot::Ready(low, _)) = self.cache.get(&idx) else {
+            return;
+        };
         let low = low.clone();
         // Swap in the full-resolution texture once the preview runs out of pixels.
         if size.x * ppp > low.size()[0] as f32 * 1.05 && (low.size()[0] as f32) < orig.x {
@@ -506,17 +606,34 @@ impl Sorter {
             _ => low,
         };
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        ui.painter().with_clip_rect(rect).image(tex.id(), img_rect, uv, egui::Color32::WHITE);
+        ui.painter()
+            .with_clip_rect(rect)
+            .image(tex.id(), img_rect, uv, egui::Color32::WHITE);
 
         if self.zoom > 1.0 {
             let loading = matches!(self.hires, Some((i, Slot::Loading)) if i == idx);
-            let text = format!("{:.0}%{}", fit * self.zoom * ppp * 100.0, if loading { "  loading full res…" } else { "" });
+            let text = format!(
+                "{:.0}%{}",
+                fit * self.zoom * ppp * 100.0,
+                if loading { "  loading full res…" } else { "" }
+            );
             let pos = rect.right_bottom() - egui::vec2(10.0, 10.0);
             let font = egui::FontId::proportional(14.0);
-            let galley = ui.painter().layout_no_wrap(text, font, egui::Color32::WHITE);
-            let bg = egui::Rect::from_min_size(pos - galley.size() - egui::vec2(6.0, 4.0), galley.size() + egui::vec2(12.0, 8.0));
-            ui.painter().rect_filled(bg, 4.0, egui::Color32::from_black_alpha(160));
-            ui.painter().galley(bg.min + egui::vec2(6.0, 4.0), galley, egui::Color32::WHITE);
+            let color = if loading { theme::ACCENT } else { theme::TEXT };
+            let galley = ui.painter().layout_no_wrap(text, font, color);
+            let bg = egui::Rect::from_min_size(
+                pos - galley.size() - egui::vec2(8.0, 5.0),
+                galley.size() + egui::vec2(16.0, 10.0),
+            );
+            ui.painter().rect(
+                bg,
+                6.0,
+                theme::PANEL.gamma_multiply(0.85),
+                egui::Stroke::new(1.0, theme::BORDER),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter()
+                .galley(bg.min + egui::vec2(8.0, 5.0), galley, color);
         }
     }
 
@@ -527,9 +644,13 @@ impl Sorter {
             i.events
                 .iter()
                 .filter_map(|e| match e {
-                    egui::Event::Key { key, pressed: true, repeat, modifiers, .. } => {
-                        Some((*key, *modifiers, *repeat))
-                    }
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat,
+                        modifiers,
+                        ..
+                    } => Some((*key, *modifiers, *repeat)),
                     _ => None,
                 })
                 .collect()
@@ -541,68 +662,124 @@ impl Sorter {
         self.schedule();
 
         let total = self.items.len();
-        let moved = self.items.iter().filter(|i| i.state == State::Moved).count();
-        let skipped = self.items.iter().filter(|i| i.state == State::Skipped).count();
+        let moved = self
+            .items
+            .iter()
+            .filter(|i| i.state == State::Moved)
+            .count();
+        let skipped = self
+            .items
+            .iter()
+            .filter(|i| i.state == State::Skipped)
+            .count();
         let pending = total - moved - skipped;
-        let done = if total == 0 { 1.0 } else { (moved + skipped) as f32 / total as f32 };
-        let weak = ui.visuals().weak_text_color();
+        let done = if total == 0 {
+            1.0
+        } else {
+            (moved + skipped) as f32 / total as f32
+        };
         let mut leave = false;
 
-        egui::Panel::top("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                leave = ui.button("Setup").on_hover_text("Change folder or targets").clicked();
-                ui.strong(format!("{} / {total}  ({:.1}%)", moved + skipped, done * 100.0));
-                ui.label(format!("{pending} left · {skipped} skipped"));
-                if let Some(c) = self.cursor {
-                    ui.separator();
-                    ui.label(&self.items[c].name);
-                    if let Some(Slot::Ready(_, [w, h])) = self.cache.get(&c) {
-                        ui.colored_label(weak, format!("{w}×{h}"));
-                    }
-                    if self.items[c].state == State::Skipped {
-                        ui.colored_label(egui::Color32::YELLOW, "skipped");
-                    }
-                }
-            });
-            ui.add(egui::ProgressBar::new(done).desired_height(4.0));
-        });
-
-        egui::Panel::bottom("keys").show(ui, |ui| {
-            if let Some(msg) = &self.message {
-                ui.colored_label(egui::Color32::from_rgb(255, 110, 110), msg);
-            }
-            ui.horizontal_wrapped(|ui| {
-                for (t, n) in self.cfg.targets.iter().zip(&self.counts) {
-                    ui.strong(format!("[{}]", t.key.symbol_or_name()));
-                    ui.label(format!("{} ({n})", t.label));
+        egui::Panel::top("status")
+            .frame(theme::bar_frame())
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    leave = ui
+                        .button("Setup")
+                        .on_hover_text("Change folder or targets")
+                        .clicked();
                     ui.add_space(8.0);
-                }
-                ui.separator();
-                ui.colored_label(
-                    weak,
-                    "Space skip · Left/Right browse · Backspace undo · Home first unsorted · \
-                     wheel/double-click zoom, drag pan, Esc fit",
+                    ui.label(
+                        RichText::new(format!("{} / {total}", moved + skipped))
+                            .strong()
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        RichText::new(format!("{:.1}%", done * 100.0))
+                            .strong()
+                            .color(theme::ACCENT),
+                    );
+                    ui.label(
+                        RichText::new(format!("{pending} left · {skipped} skipped"))
+                            .color(theme::MUTED),
+                    );
+                    if let Some(c) = self.cursor {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(Slot::Ready(_, [w, h])) = self.cache.get(&c) {
+                                theme::key_chip(
+                                    ui,
+                                    &format!("{w}×{h}"),
+                                    theme::SURFACE_HI,
+                                    theme::MUTED,
+                                );
+                            }
+                            if self.items[c].state == State::Skipped {
+                                theme::key_chip(ui, "skipped", theme::WARN, theme::BG);
+                            }
+                            ui.label(RichText::new(&self.items[c].name).color(theme::TEXT));
+                        });
+                    }
+                });
+                ui.add_space(6.0);
+                ui.add(
+                    egui::ProgressBar::new(done)
+                        .desired_height(3.0)
+                        .fill(theme::ACCENT)
+                        .corner_radius(0),
                 );
             });
-        });
+
+        egui::Panel::bottom("keys")
+            .frame(theme::bar_frame())
+            .show(ui, |ui| {
+                if let Some(msg) = &self.message {
+                    ui.colored_label(theme::DANGER, msg);
+                }
+                ui.horizontal_wrapped(|ui| {
+                    for (t, n) in self.cfg.targets.iter().zip(&self.counts) {
+                        theme::key_chip(
+                            ui,
+                            t.key.symbol_or_name(),
+                            theme::target_color(t.key),
+                            theme::BG,
+                        );
+                        ui.label(RichText::new(&t.label).color(theme::TEXT));
+                        ui.label(RichText::new(n.to_string()).color(theme::MUTED));
+                        ui.add_space(12.0);
+                    }
+                });
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    theme::hint(ui, "Space", "skip");
+                    theme::hint(ui, "Left/Right", "browse");
+                    theme::hint(ui, "Backspace", "undo");
+                    theme::hint(ui, "Home", "first unsorted");
+                    theme::hint(ui, "Wheel", "zoom");
+                    theme::hint(ui, "Double-click", "1:1");
+                    theme::hint(ui, "Esc", "fit");
+                });
+            });
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let rect = ui.max_rect();
-            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(18));
+            ui.painter().rect_filled(rect, 0.0, theme::BG);
             let center = |ui: &mut egui::Ui, text: String| {
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     text,
                     egui::FontId::proportional(18.0),
-                    egui::Color32::GRAY,
+                    theme::MUTED,
                 );
             };
             let Some(c) = self.cursor else {
                 if pending + skipped == 0 {
                     center(ui, "All images sorted.".into());
                 } else {
-                    center(ui, format!("End of list — {skipped} skipped. Press Home to revisit."));
+                    center(
+                        ui,
+                        format!("End of list — {skipped} skipped. Press Home to revisit."),
+                    );
                 }
                 return;
             };
