@@ -1,0 +1,19 @@
+[package]
+name = "swiper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif", "tiff"] }
+rfd = { version = "0.17.2", default-features = false }
+
+# Image decoding is unbearably slow unoptimised; optimise deps even in dev builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

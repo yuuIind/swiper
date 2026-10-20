@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cargo --version)",
+      "PowerShell(rustc --version)",
+      "PowerShell(cargo init --name swiper)",
+      "PowerShell(cargo add eframe --no-default-features --features glow,default_fonts)",
+      "PowerShell(cargo add image --no-default-features --features jpeg,png,webp,bmp,gif,tiff)"
+    ]
+  }
+}
